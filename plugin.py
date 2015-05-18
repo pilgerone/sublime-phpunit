@@ -292,6 +292,14 @@ class PHPUnitTextUITestRunner():
         )
 
         panel = self.window.create_output_panel('exec')
+
+        # show/hide panel
+        show_test_results_on_run = plugin_settings.get('show_test_results_on_run')
+        if show_test_results_on_run == 'on_failures' or show_test_results_on_run == False:
+            self.window.run_command('hide_panel')
+        elif show_test_results_on_run == True:
+            self.window.run_command('show_panel', {'panel': 'output.exec'})
+
         panel_settings = panel.settings()
         panel_settings.set('syntax','Packages/phpunit/test-results.hidden-tmLanguage')
         panel_settings.set('color_scheme', 'Packages/phpunit/test-results.hidden-tmTheme')
@@ -302,6 +310,34 @@ class PHPUnitTextUITestRunner():
         panel_settings.set('line_numbers', False)
         panel_settings.set('spell_check', False)
         panel_settings.set('word_wrap', True)
+
+        # setup test results listener
+        self.panel = panel
+        sublime.set_timeout_async(lambda: self.on_test_results(0), 100)
+
+    def on_test_results(self, i):
+        i += 1
+
+        result_errors = self.panel.find_all_results()
+        result_message_region = self.panel.find('^(OK|FAILURES)', 0)
+
+        if len(result_errors) > 0 or not result_message_region.empty():
+            result = self.panel.substr(self.panel.full_line(result_message_region))
+            sublime.status_message('PHPUnit %s' % result)
+
+            if 'FAILURES' in result:
+                if plugin_settings.get('show_test_results_on_run') == 'on_failures':
+                    self.window.run_command('show_panel', {'panel': 'output.exec'})
+
+            return
+
+        before = i % 8
+        after = 7 - before
+        sublime.status_message('%s [%s=%s]' % ('PHPUnit', ' ' * before, ' ' * after))
+
+        # limit wait
+        if i < 50:
+            sublime.set_timeout_async(lambda: self.on_test_results(i), 100)
 
 class PhpunitRunAllTests(sublime_plugin.WindowCommand):
 

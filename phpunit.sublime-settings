@@ -1,3 +1,4 @@
 {
-    "save_all_on_run": true
+    "save_all_on_run": true,
+    "show_test_results_on_run": "on_failures" // "on_failures", true, or false
 }
