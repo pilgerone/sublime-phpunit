@@ -20,6 +20,36 @@ See https://github.com/sebastianbergmann/phpunit/blob/0b78eddd0519dd9bf7c3535928
 			<string>source.diff</string>
 		</dict>
 
+		<dict>
+			<key>match</key>
+			<string>^\s+(\[x\])\s+.+$</string>
+			<key>captures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>test.footer.ok.phpunit-result</string>
+				</dict>
+			</dict>
+			<key>name</key>
+			<string>test.testdox.ok.phpunit-result</string>
+		</dict>
+
+		<dict>
+			<key>match</key>
+			<string>^\s+(\[\s])\s+.+$</string>
+			<key>captures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>test.footer.fail.phpunit-result</string>
+				</dict>
+			</dict>
+			<key>name</key>
+			<string>test.testdox.fail.phpunit-result</string>
+		</dict>
+
 		<!--
 			Progress
 		-->
