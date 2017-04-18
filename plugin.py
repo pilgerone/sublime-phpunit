@@ -94,6 +94,13 @@ def find_phpunit_configuration_file(file_name, folders):
 
     return None
 
+def line_generator(string):
+    prevnl = -1
+    while True:
+        nextnl = string.find('\n', prevnl + 1)
+        if nextnl < 0: break
+        yield string[prevnl + 1:nextnl]
+        prevnl = nextnl
 
 def find_phpunit_working_directory(file_name, folders):
     configuration_file = find_phpunit_configuration_file(file_name, folders)
@@ -553,10 +560,11 @@ class PhpunitexecCommand(ExecCommand):
     hide_panel_on_success = False
 
     error_header_re = re.compile('[0-9]+\)')
-    error_file_line_re = re.compile('([a-zA-Z]\:\\\[a-zA-Z0-9 \.\/\\\_-]+)(?: on line |\:)([0-9]+)')
+    error_file_line_re = re.compile('((?:[a-zA-Z]\:\\\)?[a-zA-Z0-9 \.\/\\\_-]+)(?:\:)?([0-9]+)')
+    error_php_re = re.compile('PHP [a-zA-Z ]+\: (.+) in ((?:[a-zA-Z]\:\\\)?[a-zA-Z0-9 \.\/\\\_-]+) on line ([0-9]+)')
 
     error_msg = ''
-    error_in_next_line = False
+    capturing_error_message = False
 
     def run(self, cmd, working_dir, env, quiet):
         self.hide_panel_on_success = self.settings.get("phpunit.hide_panel_on_success", False)
@@ -602,6 +610,7 @@ class PhpunitexecCommand(ExecCommand):
 
             characters = self.text_queue.popleft()
             is_empty = (len(self.text_queue) == 0)
+
         finally:
             self.text_queue_lock.release()
 
@@ -611,40 +620,49 @@ class PhpunitexecCommand(ExecCommand):
 
         if self.show_errors_inline and characters.find('\n') >= 0:
 
-            def iterate_lines(string):
-                prevnl = -1
-                while True:
-                    nextnl = string.find('\n', prevnl + 1)
-                    if nextnl < 0: break
-                    yield string[prevnl + 1:nextnl]
-                    prevnl = nextnl
+            lines = line_generator(characters)
 
-            for line in iterate_lines(characters):
-                # print('%s' % line)
-                # print('Error: %s' % error_in_next_line)
-                if self.error_in_next_line is True:
-                    # print('saving error message')
-                    self.error_msg = line if line[-1:] != '.' else line[:-1]
-                    # print('error: %s' % error_msg)
-                    self.error_in_next_line = False
+            for line in lines:
+                if self.capturing_error_message:
+                    if line != '':
+                        self.error_msg += line + '\n'
+                    else:
+                        self.capturing_error_message = False
+                        continue
+
+                match = self.error_php_re.match(line)
+
+                if match:
+                    file = match.group(2)
+                    line = int(match.group(3))
+                    error = (line, 0, match.group(1))
+                    # print('PHP ERROR')
+                    # print('message: %s' % match.group(1))
+                    # print('file: %s' % file)
+                    # print('line: %s' % line)
+
+                    if file not in self.errs_by_file:
+                        self.errs_by_file[file] = []
+                    self.errs_by_file[file].append(error)
                     continue
+
                 if self.error_header_re.match(line):
-                    self.error_in_next_line = True
-                    # print('there is an error message in the next line')
+                    self.error_msg = ''
+                    self.capturing_error_message = True
                     continue
-                if line[:2] == '+ ' or line[:2] == '- ':
-                    # print('adding line to error: %s' % line)
-                    self.error_msg += '\n' + line
-                    continue
+
                 match = self.error_file_line_re.match(line)
+
                 if match:
                     file = match.group(1)
                     line = int(match.group(2))
                     error = (line, 0, self.error_msg)
+
                     if file not in self.errs_by_file:
                         self.errs_by_file[file] = []
                     elif error in self.errs_by_file.get(file): #prevent from adding duplicated errors
                         continue
+
                     self.errs_by_file[file].append(error)
 
             self.update_phantoms()
@@ -656,20 +674,32 @@ class PhpunitexecCommand(ExecCommand):
         stylesheet = '''
             <style>
                 div.error {
-                    padding: 0.4rem 0.7rem 0.4rem 0;
+                    padding: 0.4rem 0rem -1.0rem 2.5rem;
+                    line-height: 1.5rem;
                     margin: 0.2rem 0;
                     border-radius: 2px;
                     background-color: #FF000040;
                 }
 
-                div.error span.message {
+                div.error div.message {
+                    position: relative;
+                    top: -1.5rem;
                     padding-right: 0.7rem;
-                    padding-left: 0.5rem;
+                }
+
+                div.error span.folded {
+                    position: relative;
+                    top: -0.15rem;
+                    padding: 0.95rem 0.5rem -1.65rem 0.5rem;
+                    background-color: #ffff55aa;
+                    color: black;
                 }
 
                 div.error div.diff {
+                    position: relative;
+                    top: -1.5rem;
                     padding-right: 0.7rem;
-                    padding-left: 3rem;
+                    padding-left: 0.7rem;
                 }
                 div.error div.expected {
                     color: #EE0000;
@@ -679,11 +709,16 @@ class PhpunitexecCommand(ExecCommand):
                     color: #00CC00;
                 }
 
+                div.error div.attention {
+                    color: #FFCC00;
+                }
+
                 div.error a {
                     text-decoration: inherit;
                     padding: 0.35rem 0.7rem 0.45rem 0.8rem;
                     position: relative;
                     bottom: 0.05rem;
+                    left: -2.5rem;
                     border-radius: 0 2px 2px 0;
                     font-weight: bold;
                 }
@@ -714,15 +749,41 @@ class PhpunitexecCommand(ExecCommand):
 
                     text = html.escape(text, quote=False)
 
-                    first = True
-                    for line in text.splitlines():
-                        if first:
-                            phantom_text = '<span class="message">' + line + '</span><br>'
-                            first = False
-                            continue
+                    lines = iter(text.splitlines())
 
-                        diff = 'expected' if line[:1] == '-' else 'actual'
-                        phantom_text += '<div class="diff ' + diff + '">' + line + '</div>'
+                    line = next(lines)
+                    message = line
+
+                    for line in lines:
+                        if line == '--- Expected': # error message has only 1 line
+                            break
+                        for line in lines: # error message has 3 or more lines
+                            if line == '--- Expected':
+                                message += ' <span class="folded">...</span> '
+                                message += prev_line
+                                break
+                            prev_line = line
+                        else:
+                            message += '<br>' + line # error message has only 2 lines
+                        break
+
+                    phantom_text = '<div class="message">' + message + '</div>'
+
+                    diff_count = 0
+                    diff_limit = 4
+                    diffs = ''
+
+                    for line in lines:
+                        prefix = line[:2]
+                        if prefix == '- ' or prefix == '+ ':
+                            diff_count += 1
+                            if diff_count > diff_limit:
+                                diffs = '<div class="diff attention">! many differences, check output panel</div>'
+                                break
+                            css = 'expected' if prefix == '- ' else 'actual'
+                            diffs += '<div class="diff ' + css + '">' + line + '</div>'
+
+                    phantom_text += diffs
 
                     phantoms.append(sublime.Phantom(
                         sublime.Region(pt, view.line(pt).b),
