@@ -1,12 +1,11 @@
 import re
 import os
 import shutil
-import html
+
 
 import sublime
 import sublime_plugin
 
-from Default.exec import ExecCommand
 
 DEBUG = bool(os.getenv('SUBLIME_PHPUNIT_DEBUG'))
 
@@ -94,13 +93,6 @@ def find_phpunit_configuration_file(file_name, folders):
 
     return None
 
-def line_generator(string):
-    prevnl = -1
-    while True:
-        nextnl = string.find('\n', prevnl + 1)
-        if nextnl < 0: break
-        yield string[prevnl + 1:nextnl]
-        prevnl = nextnl
 
 def find_phpunit_working_directory(file_name, folders):
     configuration_file = find_phpunit_configuration_file(file_name, folders)
@@ -125,17 +117,15 @@ def find_php_classes(view):
     """Returns an array of classes (class names) defined in the view."""
     classes = []
 
-    for class_declaration in view.find_by_selector('source.php storage.type.class'):
-        class_main = view.find('[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*+', class_declaration.end(), sublime.IGNORECASE)
-        main_class_as_string = view.substr(class_main)
-        if is_valid_php_identifier(main_class_as_string):
-            classes.append(main_class_as_string)
-            debug_message('Class definition found: %s' % (main_class_as_string) )
+    for class_as_region in view.find_by_selector('source.php entity.name.type.class - meta.use'):
+        class_as_string = view.substr(class_as_region)
+        if is_valid_php_identifier(class_as_string):
+            classes.append(class_as_string)
 
     # Quick fix for ST build >= 3114 because the default PHP package changed the
     # scope on class entities.
     if not classes:
-        for class_as_region in view.find_by_selector('source.php entity.name.class'):
+        for class_as_region in view.find_by_selector('source.php entity.name.class - meta.use'):
             class_as_string = view.substr(class_as_region)
             if is_valid_php_identifier(class_as_string):
                 classes.append(class_as_string)
@@ -299,14 +289,16 @@ class PHPUnit():
                 if view.is_dirty() and view.file_name():
                     view.run_command('save')
 
-        self.window.run_command('phpunitexec', {
-            'cmd': cmd,
+        self.window.run_command('exec', {
             'env': env,
-            'working_dir': working_dir,
-            'quiet': not is_debug(self.view)
+            'cmd': cmd,
+            'file_regex': exec_file_regex(),
+            'quiet': not is_debug(self.view),
+            'shell': False,
+            'syntax': 'Packages/phpunitkit/test-results.hidden-tmLanguage',
+            'word_wrap': False,
+            'working_dir': working_dir
         })
-
-        panel = self.view.window().get_output_panel('exec')
 
         set_window_setting('phpunit._test_last', {
             'working_dir': working_dir,
@@ -319,7 +311,7 @@ class PHPUnit():
         else:
             color_scheme = self.view.settings().get('color_scheme')
 
-        panel.settings().set('color_scheme', color_scheme)
+        self.window.create_output_panel('exec').settings().set('color_scheme', color_scheme)
 
     def run_last(self):
         kwargs = get_window_setting('phpunit._test_last', window=self.window)
@@ -553,247 +545,3 @@ class PhpunitOpenCodeCoverageCommand(sublime_plugin.WindowCommand):
 
         import webbrowser
         webbrowser.open_new_tab('file://' + coverage_html_index_html_file)
-
-class PhpunitexecCommand(ExecCommand):
-    settings = sublime.load_settings("Preferences.sublime-settings")
-    show_panel_on_build = True
-    hide_panel_on_success = False
-
-    error_header_re = re.compile('[0-9]+\)')
-    error_file_line_re = re.compile('((?:[a-zA-Z]\:\\\)?[a-zA-Z0-9 \.\/\\\_-]+)(?:\:)?([0-9]+)')
-    error_php_re = re.compile('PHP [a-zA-Z ]+\: (.+) in ((?:[a-zA-Z]\:\\\)?[a-zA-Z0-9 \.\/\\\_-]+) on line ([0-9]+)')
-
-    error_msg = ''
-    capturing_error_message = False
-
-    def run(self, cmd, working_dir, env, quiet):
-        self.hide_panel_on_success = self.settings.get("phpunit.hide_panel_on_success", False)
-
-        if self.hide_panel_on_success:
-            debug_message('Hiding the panel')
-            self.show_panel_on_build = self.settings.get("show_panel_on_build", True)
-            self.settings.set("show_panel_on_build", False)
-            self.window.run_command("hide_panel", {"panel": "output.exec"})
-
-        super().run(
-            cmd = cmd,
-            file_regex = exec_file_regex(),
-            working_dir = working_dir,
-            encoding = "utf-8",
-            env = env,
-            quiet = quiet,
-            word_wrap = False,
-            syntax = 'Packages/phpunitkit/test-results.hidden-tmLanguage'
-            )
-
-    def on_finished(self, proc):
-        super().on_finished(proc)
-
-        if self.hide_panel_on_success:
-            self.settings.set("show_panel_on_build", self.show_panel_on_build)
-
-            panel = self.window.find_output_panel('exec')
-
-            if not panel.find('^OK \([0-9]+ tests?, [0-9]+ assertions?\)', 0, sublime.IGNORECASE):
-                debug_message('Showing the panel due to test Failure')
-                self.window.run_command("show_panel", {"panel": "output.exec"})
-
-    def service_text_queue(self):
-        self.text_queue_lock.acquire()
-
-        is_empty = False
-        try:
-            if len(self.text_queue) == 0:
-                # this can happen if a new build was started, which will clear
-                # the text_queue
-                return
-
-            characters = self.text_queue.popleft()
-            is_empty = (len(self.text_queue) == 0)
-
-        finally:
-            self.text_queue_lock.release()
-
-        self.output_view.run_command(
-            'append',
-            {'characters': characters, 'force': True, 'scroll_to_end': True})
-
-        if self.show_errors_inline and characters.find('\n') >= 0:
-
-            lines = line_generator(characters)
-
-            for line in lines:
-                if self.capturing_error_message:
-                    if line != '':
-                        self.error_msg += line + '\n'
-                    else:
-                        self.capturing_error_message = False
-                        continue
-
-                match = self.error_php_re.match(line)
-
-                if match:
-                    file = match.group(2)
-                    line = int(match.group(3))
-                    error = (line, 0, match.group(1))
-                    # print('PHP ERROR')
-                    # print('message: %s' % match.group(1))
-                    # print('file: %s' % file)
-                    # print('line: %s' % line)
-
-                    if file not in self.errs_by_file:
-                        self.errs_by_file[file] = []
-                    self.errs_by_file[file].append(error)
-                    continue
-
-                if self.error_header_re.match(line):
-                    self.error_msg = ''
-                    self.capturing_error_message = True
-                    continue
-
-                match = self.error_file_line_re.match(line)
-
-                if match:
-                    file = match.group(1)
-                    line = int(match.group(2))
-                    error = (line, 0, self.error_msg)
-
-                    if file not in self.errs_by_file:
-                        self.errs_by_file[file] = []
-                    elif error in self.errs_by_file.get(file): #prevent from adding duplicated errors
-                        continue
-
-                    self.errs_by_file[file].append(error)
-
-            self.update_phantoms()
-
-        if not is_empty:
-            sublime.set_timeout(self.service_text_queue, 1)
-
-    def update_phantoms(self):
-        stylesheet = '''
-            <style>
-                div.error {
-                    padding: 0.4rem 0rem -1.0rem 2.5rem;
-                    line-height: 1.5rem;
-                    margin: 0.2rem 0;
-                    border-radius: 2px;
-                    background-color: #FF000040;
-                }
-
-                div.error div.message {
-                    position: relative;
-                    top: -1.5rem;
-                    padding-right: 0.7rem;
-                }
-
-                div.error span.folded {
-                    position: relative;
-                    top: -0.15rem;
-                    padding: 0.95rem 0.5rem -1.65rem 0.5rem;
-                    background-color: #ffff55aa;
-                    color: black;
-                }
-
-                div.error div.diff {
-                    position: relative;
-                    top: -1.5rem;
-                    padding-right: 0.7rem;
-                    padding-left: 0.7rem;
-                }
-                div.error div.expected {
-                    color: #EE0000;
-                }
-
-                div.error div.actual {
-                    color: #00CC00;
-                }
-
-                div.error div.attention {
-                    color: #FFCC00;
-                }
-
-                div.error a {
-                    text-decoration: inherit;
-                    padding: 0.35rem 0.7rem 0.45rem 0.8rem;
-                    position: relative;
-                    bottom: 0.05rem;
-                    left: -2.5rem;
-                    border-radius: 0 2px 2px 0;
-                    font-weight: bold;
-                }
-                html.dark div.error a {
-                    background-color: #00000018;
-                }
-                html.light div.error a {
-                    background-color: #ffffff18;
-                }
-            </style>
-        '''
-
-        for file, errs in self.errs_by_file.items():
-            view = self.window.find_open_file(file)
-            if view:
-
-                buffer_id = view.buffer_id()
-                if buffer_id not in self.phantom_sets_by_buffer:
-                    phantom_set = sublime.PhantomSet(view, "exec")
-                    self.phantom_sets_by_buffer[buffer_id] = phantom_set
-                else:
-                    phantom_set = self.phantom_sets_by_buffer[buffer_id]
-
-                phantoms = []
-
-                for line, column, text in errs:
-                    pt = view.text_point(line - 1, column - 1)
-
-                    text = html.escape(text, quote=False)
-
-                    lines = iter(text.splitlines())
-
-                    line = next(lines)
-                    message = line
-
-                    for line in lines:
-                        if line == '--- Expected': # error message has only 1 line
-                            break
-                        for line in lines: # error message has 3 or more lines
-                            if line == '--- Expected':
-                                message += ' <span class="folded">...</span> '
-                                message += prev_line
-                                break
-                            prev_line = line
-                        else:
-                            message += '<br>' + line # error message has only 2 lines
-                        break
-
-                    phantom_text = '<div class="message">' + message + '</div>'
-
-                    diff_count = 0
-                    diff_limit = 4
-                    diffs = ''
-
-                    for line in lines:
-                        prefix = line[:2]
-                        if prefix == '- ' or prefix == '+ ':
-                            diff_count += 1
-                            if diff_count > diff_limit:
-                                diffs = '<div class="diff attention">! many differences, check output panel</div>'
-                                break
-                            css = 'expected' if prefix == '- ' else 'actual'
-                            diffs += '<div class="diff ' + css + '">' + line + '</div>'
-
-                    phantom_text += diffs
-
-                    phantoms.append(sublime.Phantom(
-                        sublime.Region(pt, view.line(pt).b),
-                        ('<body id=inline-error>' + stylesheet +
-                            '<div class="error">' +
-                            '<a href=hide>' + chr(0x00D7) + '</a>' +
-                            phantom_text +
-                            '</div>' +
-                            '</body>'),
-                        sublime.LAYOUT_BELOW,
-                        on_navigate=self.on_phantom_navigate))
-
-                phantom_set.update(phantoms)
