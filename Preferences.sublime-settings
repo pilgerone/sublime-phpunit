@@ -31,6 +31,9 @@
     // name, on test runs.
     "phpunit.save_all_on_run": true,
 
+    // Doesn't show the ouput panel in case all tests pass
+    "hide_panel_on_success": false,
+
     // Enable the default vi keymaps.
     "phpunit.vi_keymaps": true
 }
